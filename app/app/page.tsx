@@ -39,6 +39,24 @@ const WalletMultiButton = dynamic(
 type Toast = { id: number; text: string; sig?: string };
 type Banner = { kind: "blocked" | "error"; text: string; attempt?: string; n: number } | null;
 
+type ListingGroup = { key: string; own: boolean; tickets: WithKey<TicketAccount>[] };
+
+/** Collapse resale listings that share a price into one row. Your own listings get their own group. */
+function groupListings(market: WithKey<TicketAccount>[], me: PublicKey | null): ListingGroup[] {
+  const groups = new Map<string, ListingGroup>();
+  for (const t of market) {
+    const own = !!me && t.account.owner.equals(me);
+    const key = `${own ? "mine" : "other"}-${t.account.askPrice.toString()}`;
+    const g = groups.get(key) ?? { key, own, tickets: [] };
+    g.tickets.push(t);
+    groups.set(key, g);
+  }
+  const list = Array.from(groups.values());
+  for (const g of list) g.tickets.sort((a, b) => a.account.ticketId - b.account.ticketId);
+  // Cheapest first; at the same price, other people's listings before yours.
+  return list.sort((a, b) => a.tickets[0].account.askPrice.cmp(b.tickets[0].account.askPrice) || Number(a.own) - Number(b.own));
+}
+
 export default function Home() {
   if (!PROGRAM_ID) return <SetupScreen />;
   return <App />;
@@ -395,35 +413,52 @@ function App() {
                 <div className="empty">No tickets for resale right now.</div>
               ) : (
                 <div className="list">
-                {market.map((t) => {
-                  const own = !!publicKey && t.account.owner.equals(publicKey);
+                {groupListings(market, publicKey).map(({ key, own, tickets: group }) => {
+                  // Same price = one row with a quantity. Buy takes the oldest ticket at that price.
+                  const t = group[0];
+                  const sellers = new Set(group.map((g) => g.account.owner.toBase58()));
                   return (
-                    <div className="row ticket" key={t.publicKey.toBase58()}>
-                      <div className="tnum">Ticket #{t.account.ticketId}</div>
+                    <div className="row ticket" key={key}>
+                      <div className="tnum">
+                        {group.length > 1 ? (
+                          <>
+                            <span className="qty">×{group.length}</span> available
+                          </>
+                        ) : (
+                          `Ticket #${t.account.ticketId}`
+                        )}
+                      </div>
                       <div className="ask">
                         {fmtDollars(t.account.askPrice)}
+                        {group.length > 1 && <span className="each"> each</span>}
                         {t.account.askPrice.eq(event.account.facePrice) && <small>at face</small>}
                       </div>
                       <div className="muted">
-                        Seller{" "}
-                        <a className="addr" href={explorerAddr(t.account.owner.toBase58())} target="_blank" rel="noreferrer">
-                          {short(t.account.owner)}
-                        </a>
+                        {sellers.size > 1 ? (
+                          `${sellers.size} sellers`
+                        ) : (
+                          <>
+                            Seller{" "}
+                            <a className="addr" href={explorerAddr(t.account.owner.toBase58())} target="_blank" rel="noreferrer">
+                              {short(t.account.owner)}
+                            </a>
+                          </>
+                        )}
                       </div>
                       {own ? (
-                        <span className="muted">Your listing</span>
+                        <span className="muted">{group.length > 1 ? "Your listings" : "Your listing"}</span>
                       ) : (
                         <button
                           disabled={!!busy}
                           onClick={() =>
                             run(
-                              `resale-${t.account.ticketId}`,
+                              `resale-${key}`,
                               `Ticket #${t.account.ticketId} is yours. You paid ${fmtDollars(t.account.askPrice)} straight to the seller`,
                               () => ix.buyResale(program, publicKey!, t)
                             )
                           }
                         >
-                          {busy === `resale-${t.account.ticketId}` ? (
+                          {busy === `resale-${key}` ? (
                             <Busy>Buying…</Busy>
                           ) : publicKey ? (
                             "Buy"
